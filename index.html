@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!--
+  JSC DIAGNOSTICS — browser-side JavaScriptCore limit & parsing-boundary probe suite
+
+  Deployment (GitHub Pages):
+    1. Push this file as index.html to a repo (root, /docs, or a branch of your choice).
+    2. Repo Settings → Pages → Source: Deploy from a branch → pick the branch/folder.
+    3. Site is live at https://<user>.github.io/<repo>/
+  No build step, no dependencies — vanilla HTML5/CSS3/ES2022.
+
+  Tests target behaviors audited in Source/JavaScriptCore:
+    - BigInt:   1-Mbit (1,048,576-bit) maxLength cap in runtime/JSBigInt.h
+    - DataView/TypedArray: verifySubRangeLength + detached-buffer guards (runtime/ArrayBufferView.h)
+    - JSON:     LiteralParser strict mode + soft-stack recursion limit (runtime/LiteralParser.*)
+    - base64:   forgiving-base64 atob vs strict padding/alphabet rules (wtf/text/Base64.cpp)
+    - Strings:  StringImpl::MaxLength = INT32_MAX (wtf/text/StringImpl.h)
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e14">
+<meta name="description" content="Browser-side diagnostic probes for JavaScriptCore engine limits and parsing boundaries.">
+<title>jsc-diagnostics :: engine limit probes</title>
+<style>
+/* ============================================================
+   Palette & base — terminal / hacker aesthetic, dark by default
+   ============================================================ */
+:root {
+  --bg:        #0a0e14;
+  --bg-grid:   rgba(63, 255, 175, 0.025);
+  --panel:     #0f151e;
+  --panel-2:   #131b26;
+  --border:    #1e2a3a;
+  --border-hi: #2c3e54;
+  --fg:        #c7d3e0;
+  --fg-dim:    #6b7d92;
+  --accent:    #3fffb0;   /* phosphor green */
+  --cyan:      #41d6ff;
+  --amber:     #ffc857;
+  --red:       #ff5d73;
+  --violet:    #b18cff;
+  --radius:    10px;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background:
+    linear-gradient(var(--bg-grid) 1px, transparent 1px) 0 0 / 100% 28px,
+    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px) 0 0 / 28px 100%,
+    var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* ============================================================
+   Header
+   ============================================================ */
+header {
+  padding: 20px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #0d1219 0%, rgba(13,18,25,0.6) 100%);
+}
+.head-row {
+  max-width: 1180px; margin: 0 auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+}
+h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: 0.5px; color: var(--accent); }
+h1 .dim { color: var(--fg-dim); font-weight: 400; }
+.caret {
+  display: inline-block; width: 8px; height: 15px; margin-left: 6px;
+  background: var(--accent); vertical-align: text-bottom;
+  animation: blink 1.1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+.spacer { flex: 1; }
+.badge {
+  font-size: 11px; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border-hi); color: var(--fg-dim);
+  background: var(--panel); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 46vw;
+}
+.badge.ok   { color: var(--accent); border-color: rgba(63,255,175,.35); }
+.tally { display: flex; gap: 6px; font-size: 12px; }
+.tally span {
+  padding: 3px 8px; border-radius: 6px; background: var(--panel);
+  border: 1px solid var(--border);
+}
+.tally .t-pass  { color: var(--accent); }
+.tally .t-fail  { color: var(--red); }
+.tally .t-warn  { color: var(--amber); }
+.tally .t-skip  { color: var(--fg-dim); }
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+button {
+  font-family: var(--mono); font-size: 13px; cursor: pointer;
+  color: var(--accent); background: var(--panel-2);
+  border: 1px solid var(--border-hi); border-radius: 8px;
+  padding: 9px 14px; transition: border-color .15s, background .15s, transform .05s;
+}
+button:hover  { border-color: var(--accent); background: #16202c; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .45; cursor: wait; transform: none; }
+button.primary {
+  background: linear-gradient(180deg, #123528, #0e2a20);
+  border-color: rgba(63,255,175,.4); color: var(--accent);
+}
+button.ghost { background: transparent; }
+button.small { padding: 5px 10px; font-size: 11px; }
+
+/* ============================================================
+   Cards grid
+   ============================================================ */
+main { max-width: 1180px; margin: 0 auto; padding: 16px; }
+.grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  display: flex; flex-direction: column; gap: 10px;
+  position: relative;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+.card.running { border-color: var(--cyan); }
+.card.pass    { border-color: rgba(63,255,175,.45); }
+.card.fail    { border-color: rgba(255,93,115,.5); }
+.card-top { display: flex; align-items: flex-start; gap: 10px; }
+.card h2 { font-size: 13.5px; margin: 0; color: var(--fg); font-weight: 600; flex: 1; }
+.card h2 .sigil { color: var(--cyan); margin-right: 6px; }
+.card p { margin: 0; font-size: 12px; color: var(--fg-dim); }
+.card .probe-list { margin: 0; padding: 0; list-style: none; font-size: 11.5px; color: var(--fg-dim); }
+.card .probe-list li { padding: 1px 0 1px 14px; position: relative; }
+.card .probe-list li::before { content: "▸"; position: absolute; left: 0; color: var(--border-hi); }
+.card-foot { display: flex; align-items: center; gap: 10px; margin-top: auto; }
+.card-foot .time { font-size: 11px; color: var(--fg-dim); }
+
+/* Status pill */
+.pill {
+  font-size: 10.5px; letter-spacing: .8px; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border-hi); color: var(--fg-dim); white-space: nowrap;
+}
+.pill.idle    { color: var(--fg-dim); }
+.pill.running { color: var(--cyan);  border-color: rgba(65,214,255,.5); animation: pulse 1s ease-in-out infinite; }
+.pill.pass    { color: var(--accent); border-color: rgba(63,255,175,.45); }
+.pill.fail    { color: var(--red);    border-color: rgba(255,93,115,.5); }
+@keyframes pulse { 50% { opacity: .55; } }
+
+/* ============================================================
+   Console
+   ============================================================ */
+.console-wrap { margin-top: 18px; }
+.console-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.console-bar .title { font-size: 12px; color: var(--fg-dim); letter-spacing: 1px; }
+.console-bar .title b { color: var(--accent); font-weight: 600; }
+#console {
+  background: #070b10;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  height: min(46dvh, 420px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;   /* momentum scroll on iOS */
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  overscroll-behavior: contain;
+}
+#console .line { white-space: pre-wrap; word-break: break-word; }
+#console .ts    { color: #3a4a5e; }
+#console .info  { color: var(--fg); }
+#console .head  { color: var(--cyan); }
+#console .pass  { color: var(--accent); }
+#console .fail  { color: var(--red); }
+#console .warn  { color: var(--amber); }
+#console .skip  { color: var(--violet); }
+#console .muted { color: var(--fg-dim); }
+
+/* ============================================================
+   Engine info card
+   ============================================================ */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 11.5px; }
+.kv dt { color: var(--fg-dim); white-space: nowrap; }
+.kv dd { margin: 0; color: var(--fg); word-break: break-all; }
+
+footer {
+  max-width: 1180px; margin: 0 auto; padding: 14px 16px calc(20px + env(safe-area-inset-bottom));
+  font-size: 11px; color: var(--fg-dim);
+}
+footer a { color: var(--cyan); text-decoration: none; }
+
+@media (max-width: 560px) {
+  body { font-size: 13px; }
+  h1 { font-size: 15px; }
+  .badge { max-width: 100%; }
+  #console { height: 52dvh; }
+  button { padding: 11px 16px; }        /* comfortable touch targets */
+}
+@media (prefers-reduced-motion: reduce) {
+  .caret, .pill.running { animation: none; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="head-row">
+    <h1>jsc-diagnostics<span class="dim"> :: engine limit probes</span><span class="caret"></span></h1>
+    <span class="spacer"></span>
+    <span class="badge" id="engineBadge">detecting engine…</span>
+    <div class="tally" aria-live="polite">
+      <span class="t-pass">PASS <b id="tallyPass">0</b></span>
+      <span class="t-fail">FAIL <b id="tallyFail">0</b></span>
+      <span class="t-warn">WARN <b id="tallyWarn">0</b></span>
+      <span class="t-skip">SKIP <b id="tallySkip">0</b></span>
+    </div>
+    <button class="primary" id="runAll">▶ RUN ALL</button>
+  </div>
+</header>
+
+<main>
+  <div class="grid" id="grid"><!-- test cards injected by JS --></div>
+
+  <section class="console-wrap">
+    <div class="console-bar">
+      <span class="title"><b>~/logs</b> ./diagnostics.out</span>
+      <span class="spacer"></span>
+      <label style="font-size:11px;color:var(--fg-dim);display:flex;align-items:center;gap:5px;">
+        <input type="checkbox" id="autoscroll" checked> autoscroll
+      </label>
+      <button class="small ghost" id="copyResults">copy results</button>
+      <button class="small ghost" id="clearConsole">clear</button>
+    </div>
+    <div id="console" role="log" aria-live="polite"></div>
+  </section>
+
+  <section class="card" style="margin-top:18px;">
+    <div class="card-top"><h2><span class="sigil">$</span>engine / environment</h2></div>
+    <dl class="kv" id="envInfo"></dl>
+  </section>
+</main>
+
+<footer>
+  probes target JavaScriptCore boundaries: 1-Mbit BigInt cap (JSBigInt.h),
+  verifySubRangeLength / detached-buffer guards (ArrayBufferView.h),
+  LiteralParser strictness + soft stack limit (LiteralParser.*),
+  forgiving-base64 rules (wtf/text/Base64.cpp), StringImpl::MaxLength (INT32_MAX).
+  Results on non-WebKit engines (V8/Gecko) are expected to differ — that's the point.
+</footer>
+
+<script>
+"use strict";
+/* ============================================================================
+ * Utilities: console, timing, engine detection
+ * ==========================================================================*/
+const $ = (sel) => document.querySelector(sel);
+const consoleEl = $("#console");
+const autoscroll = $("#autoscroll");
+const MAX_LOG_LINES = 1200;
+
+const TALLY = { pass: 0, fail: 0, warn: 0, skip: 0 };
+
+function log(kind, msg) {
+  const line = document.createElement("div");
+  line.className = "line " + kind;
+  const t = new Date().toTimeString().slice(0, 8);
+  line.innerHTML = `<span class="ts">[${t}]</span> `;
+  line.appendChild(document.createTextNode(msg));
+  consoleEl.appendChild(line);
+  while (consoleEl.childNodes.length > MAX_LOG_LINES) consoleEl.removeChild(consoleEl.firstChild);
+  if (autoscroll.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+const info  = (m) => log("info",  m);
+const head  = (m) => log("head",  m);
+const pass_ = (m) => { TALLY.pass++; log("pass",  "✔ " + m); syncTally(); };
+const fail_ = (m) => { TALLY.fail++; log("fail",  "✘ " + m); syncTally(); };
+const warn_ = (m) => { TALLY.warn++; log("warn",  "! " + m); syncTally(); };
+const skip_ = (m) => { TALLY.skip++; log("skip",  "○ SKIP " + m); syncTally(); };
+const muted = (m) => log("muted",  m);
+
+function syncTally() {
+  $("#tallyPass").textContent = TALLY.pass;
+  $("#tallyFail").textContent = TALLY.fail;
+  $("#tallyWarn").textContent = TALLY.warn;
+  $("#tallySkip").textContent = TALLY.skip;
+}
+
+/* assert helpers — every probe funnels through these so output is uniform */
+function check(cond, label, detail = "") {
+  if (cond) pass_(detail ? `${label} — ${detail}` : label);
+  else      fail_(detail ? `${label} — ${detail}` : label);
+}
+function expectThrow(fn, ctorName, label) {
+  try {
+    fn();
+    fail_(`${label} — no exception thrown (expected ${ctorName})`);
+    return null;
+  } catch (e) {
+    const ok = ctorName === "any" || e?.constructor?.name === ctorName ||
+               (ctorName === "RangeError"   && e instanceof RangeError) ||
+               (ctorName === "SyntaxError"  && e instanceof SyntaxError) ||
+               (ctorName === "TypeError"    && e instanceof TypeError) ||
+               (ctorName === "InvalidCharacterError" && e?.name === "InvalidCharacterError");
+    if (ok) pass_(`${label} — ${e.constructor.name}: ${truncate(String(e.message), 70)}`);
+    else    fail_(`${label} — wrong exception: ${e?.constructor?.name}: ${e}`);
+    return e;
+  }
+}
+const expectNoThrow = (fn, label) => {
+  try { const v = fn(); pass_(label); return v; }
+  catch (e) { fail_(`${label} — unexpected ${e?.constructor?.name}: ${truncate(String(e.message), 60)}`); return undefined; }
+};
+const truncate = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+const fmtBytes = (n) => n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + " GiB"
+                  : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MiB"
+                  : n >= 1 << 10 ? (n / (1 << 10)).toFixed(1) + " KiB" : n + " B";
+const fmtNum = (n) => n.toLocaleString("en-US");
+
+/* Engine detection */
+function detectEngine() {
+  const ua = navigator.userAgent;
+  let engine = "unknown", label = "unknown engine";
+  const isSafari = /Safari\//.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/.test(ua);
+  const isFirefox = /Firefox\//.test(ua);
+  const isChrome  = /(Chrome|Chromium|Edg|OPR)\//.test(ua);
+  if (typeof navigator.webkitGetBattery === "function" || (isChrome && /AppleWebKit/.test(ua))) {
+    engine = /AppleWebKit/.test(ua) ? "blink-webkit-fork" : "blink";
+    label = isChrome ? "Blink (Chrome/Edge/Opera — V8)" : "Blink fork (V8)";
+    if (/Edg\//.test(ua)) label = "Blink (Edge — V8)";
+  }
+  if (isFirefox)  { engine = "gecko";  label = "Gecko (Firefox)"; }
+  if (isSafari)   { engine = "jsc";    label = "JavaScriptCore (Safari/WebKit)"; }
+  // iOS: every browser (Chrome/Firefox/Edge included) is a WebKit skin — all JSC.
+  // iPad desktop-mode reports MacIntel but has heavy multitouch.
+  const isPadDesktopMode = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+  if (/AppleWebKit/.test(ua) && (/iPhone|iPad|iPod/.test(ua) || isPadDesktopMode)) {
+    engine = "jsc";
+    label = isChrome ? "JavaScriptCore (iOS Chrome — WebKit skin)"
+          : isFirefox ? "JavaScriptCore (iOS Firefox — WebKit skin)"
+          : "JavaScriptCore (Safari/WebKit, iOS)";
+  }
+  return { engine, label, isSafari, isFirefox, isChrome, ua };
+}
+const ENGINE = detectEngine();
+
+function featureDetect() {
+  const f = {};
+  try { f.bigInt = typeof BigInt === "function" && BigInt("123") === 123n; } catch { f.bigInt = false; }
+  try { f.bigInt64 = typeof BigInt64Array === "function"; } catch { f.bigInt64 = false; }
+  try { new ArrayBuffer(8, { maxByteLength: 16 }); f.resizableAB = true; } catch { f.resizableAB = false; }
+  try {
+    const b = new ArrayBuffer(8);
+    structuredClone(b, { transfer: [b] });
+    f.detach = b.byteLength === 0;
+  } catch { f.detach = false; }
+  try { f.wasm = typeof WebAssembly === "object"; } catch { f.wasm = false; }
+  try { f.sharedMem = typeof SharedArrayBuffer === "function"; } catch { f.sharedMem = false; }
+  return f;
+}
+const FEATURES = featureDetect();
+
+/* ============================================================================
+ * Test suite registry
+ * ==========================================================================*/
+const SUITES = [];
+
+/* ---------------------------------------------------------------------------
+ * Suite 1 — BigInt string parsing limit
+ * JSC: runtime/JSBigInt.h — maxLengthBits = 1024*1024 (1 Mbit).
+ * Estimated digit count from input length must fit maxLength, else RangeError.
+ * Expected decimal boundary ≈ 315,653 chars, hex ≈ 262,144, binary = 1,048,576.
+ * On V8/Gecko the cap differs — the probe reports the found boundary either way.
+ * ------------------------------------------------------------------------ */
+SUITES.push({
+  id: "bigint",
+  sigil: "0x",
+  title: "BigInt string parsing limit",
+  desc: "Binary-searches the largest decimal/hex/binary digit string BigInt() accepts, then probes past the 1-Mbit boundary for RangeError/OOM behavior.",
+  probes: [
+    "baseline parse + arithmetic sanity",
+    "decimal / hex / binary boundary search",
+    "over-limit rejection: RangeError, not silent truncation",
+    "repeat() overflow and non-string inputs",
+  ],
+  async run() {
+    if (!FEATURES.bigInt) { skip_("BigInt not available in this engine"); return; }
+
+    // Baseline
+    expectNoThrow(() => BigInt("9".repeat(1000)), "parse 1,000-digit decimal");
+    check(BigInt("2") ** 1024n > 0n, "2^1024 evaluates");
+
+    const maxLenBits = 1024 * 1024; // JSC's documented cap (JSBigInt.h)
+    muted(`JSC reference cap: ${fmtNum(maxLenBits)} bits (1 Mi bit)`);
+
+    // Exponential-then-binary search for the accept/reject boundary per radix.
+    const findBoundary = (genChar) => {
+      let lo = 1, hi = null;
+      const accepts = (n) => { try { BigInt(genChar.repeat(n)); return true; } catch { return false; } };
+      // exponential probe, capped at 4 Mi chars to bound memory on mobile
+      for (let n = 4096; n <= 1 << 22; n *= 2) {
+        if (!accepts(n)) { hi = n; lo = n / 2; break; }
+        lo = n;
+      }
+      if (hi === null) return { lo, hi: null };
+      while (hi - lo > 64) {          // 64-char precision: identifies the 1-Mbit boundary cheaply
+        const mid = (lo + hi) >> 1;
+        if (accepts(mid)) lo = mid; else hi = mid;
+      }
+      return { lo, hi };
+    };
+
+    const cases = [
+      { name: "binary (radix 2)",  char: "1",     estBits: (n) => n },
+      { name: "hex (radix 16)",    char: "f",     estBits: (n) => n * 4 },
+      { name: "decimal (radix 10)",char: "9",     estBits: (n) => Math.ceil(n * 3.321928) },
+    ];
+    for (const c of cases) {
+      const t0 = performance.now();
+      const b = findBoundary(c.char);
+      const ms = (performance.now() - t0).toFixed(0);
+      if (b.hi === null) {
+        warn_(`${c.name}: accepted every probed size up to ${fmtNum(b.lo)} chars — no cap hit (engine allows ≥ ${fmtNum(c.estBits(b.lo))} bits)`);
+        continue;
+      }
+      const err = expectThrow(() => BigInt(c.char.repeat(b.hi)), "RangeError",
+                              `${c.name}: first rejection at ${fmtNum(b.hi)} chars`);
+      const bits = c.estBits(b.hi);
+      const jscLike = err instanceof RangeError && Math.abs(bits - maxLenBits) / maxLenBits < 0.02;
+      info(`  ↳ largest accepted: ${fmtNum(b.lo)} chars (≈ ${fmtNum(c.estBits(b.lo))} bits) · search took ${ms}ms`);
+      info(`  ↳ rejected size ≈ ${fmtNum(bits)} bits — ${jscLike
+        ? "matches JSC's 1-Mbit maxLength cap"
+        : "differs from JSC's 1-Mbit cap (non-JSC engine, or estimate rounding)"}`);
+    }
+
+    // Rejection quality: error must be RangeError, thrown promptly, no truncation.
+    // Tolerant: engines with a higher cap (e.g. V8) legitimately accept this.
+    {
+      const t0 = performance.now();
+      try {
+        const big = BigInt("1".repeat(4_000_000));
+        info(`4M-char binary string accepted (≈ 4 Mbit, above JSC's 1-Mbit cap) — non-JSC engine or raised limit`);
+        muted(`  ↳ parsed in ${(performance.now() - t0).toFixed(0)}ms, bit length = ${big.toString(2).length}`);
+      } catch (err) {
+        const ok = err instanceof RangeError;
+        (ok ? pass_ : fail_)(
+          `4M-char binary string ${ok ? "rejected with RangeError" : "threw " + err.constructor.name}` +
+          ` in ${(performance.now() - t0).toFixed(1)}ms — ${ok ? "fast-fail before allocation (tryCreateWithLength guard)" : "expected RangeError"}`);
+      }
+    }
+
+    // Spec-mandated errors
+    expectThrow(() => BigInt("-"), "SyntaxError", 'BigInt("-") throws SyntaxError');
+    expectThrow(() => BigInt("12a"), "SyntaxError", 'BigInt("12a") throws SyntaxError');
+    expectThrow(() => BigInt("0".repeat(1e6) + "1"), "SyntaxError",
+                "non-canonical leading-zero run rejected");
+
+    // repeat()/pow scale checks that never allocate
+    expectThrow(() => "1".repeat(2 ** 32), "RangeError", "String.repeat(2^32) throws RangeError (no wrap)");
+  },
+});
+
+/* ---------------------------------------------------------------------------
+ * Suite 2 — TypedArray & DataView boundary stress
+ * JSC: runtime/ArrayBufferView.h verifySubRangeLength (subtract-then-divide,
+ * never multiplies); JSDataViewPrototype per-access `offset > len - elemSize`;
+ * detached buffers -> TypeError on DataView access, 0-length views.
+ * ------------------------------------------------------------------------ */
+SUITES.push({
+  id: "typedarray",
+  sigil: "[]",
+  title: "TypedArray & DataView boundary stress",
+  desc: "Out-of-bounds constructors, sub-range math near SIZE_MAX, detached-buffer access, and (where supported) resizable-buffer shrink/grow re-validation.",
+  probes: [
+    "constructor OOB: byteOffset / length past byteLength",
+    "DataView get/set at byteLength - elementSize",
+    "detached buffer: DataView TypeError, view length 0",
+    "resizable ArrayBuffer re-validation (if supported)",
+    "set/subarray clamping is silent, not throwing (spec)",
+  ],
+  async run() {
+    const buf = new ArrayBuffer(1024);
+    const u8  = new Uint8Array(buf);
+
+    // --- constructor boundaries (verifySubRangeLength path) ---
+    expectNoThrow(() => new Uint8Array(buf, 0, 1024), "exact-fit view (offset 0, len 1024)");
+    expectNoThrow(() => new Uint8Array(buf, 1024),    "zero-length view at offset == byteLength");
+    expectThrow(() => new Uint8Array(buf, 1025), "RangeError", "offset byteLength+1 rejected");
+    expectThrow(() => new Uint8Array(buf, 512, 513), "RangeError", "offset+len past end rejected");
+    expectThrow(() => new Uint8Array(buf, 1, 0xffffffff), "RangeError",
+                "length 0xFFFFFFFF rejected (subtract-then-divide, no multiply wrap)");
+    expectThrow(() => new Float64Array(buf, 7), "RangeError", "misaligned Float64Array offset rejected");
+    expectThrow(() => new Float64Array(buf, 1017, 2), "RangeError", "float64 view straddling end rejected");
+
+    // --- DataView per-access checks (JSDataViewPrototype.cpp form) ---
+    const dv = new DataView(buf);
+    expectNoThrow(() => dv.getUint8(1023), "getUint8 at byteLength-1");
+    expectNoThrow(() => dv.getBigUint64(1016), "getBigUint64 at byteLength-8");
+    expectThrow(() => dv.getUint8(1024), "RangeError", "getUint8 at byteLength rejected");
+    expectThrow(() => dv.getUint32(1021), "RangeError", "getUint32 straddling end rejected");
+    expectThrow(() => dv.getFloat64(1017), "RangeError", "getFloat64 straddling end rejected");
+    expectThrow(() => dv.setUint32(2 ** 53, 0), "RangeError", "offset 2^53 rejected (toIndex range)");
+    expectThrow(() => dv.setBigInt64(1017, 1n), "RangeError", "setBigInt64 straddling end rejected");
+
+    // huge-offset arithmetic must not wrap (isSumSmallerThanOrEqual guard)
+    expectThrow(() => new DataView(buf, 2 ** 52), "RangeError", "DataView offset 2^52 rejected");
+    expectThrow(() => new Uint8Array(buf, 2 ** 53 - 1), "RangeError", "view offset 2^53-1 rejected");
+
+    // --- clamping paths: silent per spec, verify they do NOT throw ---
+    const clamped = expectNoThrow(() => u8.subarray(1000, 1e9), "subarray(1000, 1e9) clamps silently");
+    if (clamped) check(clamped.length === 24, "clamped subarray length is 24", `got ${clamped.length}`);
+    expectNoThrow(() => u8.set(new Uint8Array(4096), 1000), "set() with huge source clamps to fit");
+
+    // --- detached buffers (structuredClone transfer) ---
+    if (!FEATURES.detach) {
+      skip_("buffer detachment via structuredClone(transfer) unsupported here");
+    } else {
+      const victim = new ArrayBuffer(64);
+      const view = new Uint8Array(victim, 8, 8);
+      const dvictim = new DataView(victim);
+      structuredClone(victim, { transfer: [victim] });
+      check(victim.byteLength === 0, "detached ArrayBuffer reports byteLength 0");
+      check(view.length === 0, "detached view reports length 0 (spec)", `got ${view.length}`);
+      check(view[0] === undefined, "detached view indexed read returns undefined");
+      expectNoThrow(() => { view[0] = 42; }, "detached view indexed write is a silent no-op (spec)");
+      expectThrow(() => dvictim.byteLength, "TypeError", "detached DataView .byteLength throws TypeError");
+      expectThrow(() => dvictim.getUint8(0), "TypeError", "detached DataView .getUint8 throws TypeError");
+      expectThrow(() => new DataView(victim), "TypeError", "new DataView(detached) throws TypeError");
+    }
+
+    // --- resizable ArrayBuffers (Safari 17.4+, Chrome 111+) ---
+    if (!FEATURES.resizableAB) {
+      skip_("resizable ArrayBuffer (new ArrayBuffer(n, {maxByteLength})) unsupported");
+    } else {
+      const rab = new ArrayBuffer(16, { maxByteLength: 64 });
+      const rview = new Uint8Array(rab, 8, 8);
+      expectThrow(() => new Uint8Array(rab, 8, 9), "RangeError", "initial view len > current length rejected");
+      rab.resize(32);
+      expectNoThrow(() => new Uint8Array(rab, 8, 24), "grown buffer accepts offset+len within new length");
+      expectNoThrow(() => rview[7], "existing view still in-bounds after grow");
+      rab.resize(8);
+      check(rview.length === 0, "shrunk buffer: pre-existing view becomes length 0", `got ${rview.length}`);
+      expectNoThrow(() => new DataView(rab, 0, 8), "DataView(byteLength=8) still valid after shrink to 8");
+      expectThrow(() => new DataView(rab, 1, 8), "RangeError", "DataView(1,8) rejected after shrink (1+8 > 8)");
+      const rdv = new DataView(rab);
+      expectNoThrow(() => rdv.getUint8(7), "DataView getUint8 at new byteLength-1 after shrink");
+      expectThrow(() => rdv.getUint8(8), "RangeError", "DataView getUint8 at old byteLength throws after shrink");
+    }
+  },
+});
+
+/* ---------------------------------------------------------------------------
+ * Suite 3 — JSON nesting & parsing depth
+ * JSC: runtime/LiteralParser.* — strict grammar (no trailing commas, no single
+ * quotes), recursion guarded by vm.softStackLimit() -> RangeError, never a
+ * native stack crash; element-stack overflow -> OOM error, not corruption.
+ * ------------------------------------------------------------------------ */
+SUITES.push({
+  id: "json",
+  sigil: "{}",
+  title: "JSON nesting & parsing depth",
+  desc: "Finds the maximum accepted array/object nesting depth (expect RangeError from the soft stack limit, not a tab crash), then verifies strict-grammar rejection of malformed documents.",
+  probes: [
+    "deep array nesting boundary search (binary)",
+    "deep object nesting boundary search",
+    "malformed documents all throw SyntaxError",
+    "valid edge documents parse cleanly",
+  ],
+  async run() {
+    // boundary search: largest depth that parses, smallest that throws
+    const depthBoundary = (wrap) => {
+      const build = (d) => wrap[0].repeat(d) + "1" + wrap[1].repeat(d);
+      const accepts = (d) => { try { JSON.parse(build(d)); return true; } catch { return false; } };
+      let lo = 1, hi = null;
+      for (let d = 1000; d <= 512_000; d *= 2) {
+        if (!accepts(d)) { hi = d; lo = d / 2; break; }
+        lo = d;
+      }
+      if (hi === null) return { lo, hi: null };
+      while (hi - lo > 10) {                      // 10-deep precision is plenty
+        const mid = ((lo + hi) >> 1);
+        if (accepts(mid)) lo = mid; else hi = mid;
+      }
+      return { lo, hi };
+    };
+
+    for (const [name, wrap] of [["array", ["[", "]"]], ["object", ['{"a":', "}"]]]) {
+      const t0 = performance.now();
+      const b = depthBoundary(wrap);
+      const ms = (performance.now() - t0).toFixed(0);
+      if (b.hi === null) {
+        warn_(`${name} nesting: parsed every probed depth up to ${fmtNum(b.lo)} — no limit hit`);
+      } else {
+        // Tolerant: JSC/V8 throw RangeError from the soft stack limit; Gecko may
+        // differ — the diagnostic signal is *which* error and at *what* depth.
+        let err = null, threw = false;
+        try { JSON.parse(wrap[0].repeat(b.hi) + "1" + wrap[1].repeat(b.hi)); }
+        catch (e) { threw = true; err = e; }
+        if (threw && err instanceof RangeError)
+          pass_(`${name} nesting: depth ${fmtNum(b.hi)} rejected with RangeError (soft stack limit, no tab crash)`);
+        else if (threw)
+          warn_(`${name} nesting: depth ${fmtNum(b.hi)} threw ${err.constructor.name}: ${truncate(String(err.message), 60)} (expected RangeError on JSC)`);
+        else
+          fail_(`${name} nesting: depth ${fmtNum(b.hi)} parsed without any exception — boundary search inconsistent`);
+        info(`  ↳ max accepted depth ≈ ${fmtNum(b.lo)} · search took ${ms}ms`);
+        if (err) muted(`  ↳ error: ${truncate(String(err.message), 72)}`);
+      }
+    }
+
+    // Strict-grammar rejection (StrictJSON mode): must throw SyntaxError where marked.
+    const bad = [
+      // [label, document, shouldThrow]
+      ["trailing comma in array",   "[1,2,]",          true],
+      ["trailing comma in object",  '{"a":1,}',        true],
+      ["single-quoted string",      "{'a':1}",         true],
+      ["unquoted key",              "{a:1}",           true],
+      ["leading zero number",       "01",              true],
+      ["hex literal",               "0x10",            true],
+      ["NaN / Infinity literals",   "[NaN,Infinity,-Infinity]", true],
+      ["comment",                   '{"a":1 /* c */}', true],
+      ["unterminated string",       '{"a":"oops}',     true],
+      ["unterminated object",       '{"a":1',          true],
+      ["bare colon",                "{:}",             true],
+      ["undefined value",           "[undefined]",     true],
+      ["function-ish",              "[function(){}]",  true],
+      ["trailing garbage",          "[1] junk",        true],
+      ["lone-surrogate escape",     '"\\uD800"',       false], // valid per JSON grammar (JSON.stringify produces these)
+    ];
+    for (const [label, doc, shouldThrow] of bad) {
+      if (shouldThrow) expectThrow(() => JSON.parse(doc), "SyntaxError", `rejects ${label}`);
+      else expectNoThrow(() => JSON.parse(doc), `${label} parses (spec: valid JSON)`);
+    }
+
+    // Valid edge documents
+    expectNoThrow(() => JSON.parse('{"a":[1,2,{"b":null}],"c":"\\u00e9\\n"}'), "nested valid document parses");
+    check(JSON.parse("[1,2]").length === 2, "array round-trip");
+    expectNoThrow(() => JSON.parse('"' + "x".repeat(1e5) + '"'), "100 KB string literal parses");
+  },
+});
+
+/* ---------------------------------------------------------------------------
+ * Suite 4 — base64 / atob edge cases
+ * JSC: wtf/text/Base64.cpp — JS atob uses forgiving-base64: whitespace ignored,
+ * missing padding tolerated for len%4 ∈ {2,3}, but len%4==1, bad alphabet,
+ * misplaced/overlong padding -> InvalidCharacterError.
+ * ------------------------------------------------------------------------ */
+SUITES.push({
+  id: "base64",
+  sigil: "==",
+  title: "base64 / atob edge cases",
+  desc: "Probes forgiving-vs-strict decoding: alphabet rejection, padding rules, whitespace tolerance, length%4 semantics, and btoa round-trips.",
+  probes: [
+    "alphabet rejection: non-base64 chars throw",
+    "padding rules: '=' count and placement",
+    "length % 4 == 1 always rejected",
+    "ASCII whitespace is ignored (forgiving mode)",
+    "btoa binary round-trip 0x00–0xFF",
+  ],
+  async run() {
+    if (typeof atob !== "function") { skip_("atob unavailable"); return; }
+
+    check(atob("SGVsbG8=") === "Hello", 'atob("SGVsbG8=") === "Hello"');
+    check(atob("") === "", "empty string decodes to empty string");
+
+    // Invalid alphabet — must throw InvalidCharacterError
+    for (const s of ["@@@@@", "SGVsbG8=!", "=====", "$$$$", "SGVsbG8=é"]) {
+      expectThrow(() => atob(s), "InvalidCharacterError", `rejects invalid alphabet: "${truncate(s, 12)}"`);
+    }
+
+    // Padding rules
+    expectThrow(() => atob("A==="), "InvalidCharacterError", 'rejects "A===" (overlong padding)');
+    expectThrow(() => atob("=AAA"), "InvalidCharacterError", 'rejects "=AAA" (padding first)');
+    expectThrow(() => atob("AB=C"), "InvalidCharacterError", 'rejects "AB=C" (padding mid-block)');
+    expectThrow(() => atob("SGVsbG8==="), "InvalidCharacterError", 'rejects "SGVsbG8===" (3 padding chars)');
+
+    // Length % 4 == 1: rejected even in forgiving mode (no valid 1-char tail)
+    expectThrow(() => atob("Q"), "InvalidCharacterError", 'length%4==1 ("Q") rejected');
+    expectThrow(() => atob("SGVsbG8Q"), "InvalidCharacterError", "length%4==1 with valid prefix rejected");
+
+    // Forgiving successes — these must NOT throw
+    check(atob("QQ") === "A", 'missing padding tolerated: atob("QQ") === "A" (len%4==2)');
+    check(atob("QQQ") === "AA", 'missing padding tolerated: atob("QQQ") === "AA" (len%4==3)');
+    check(atob("  SGVsbG8=  ") === "Hello", "leading/trailing whitespace ignored");
+    check(atob("SG Vs\nbG8=") === "Hello", "interior whitespace ignored");
+    check(atob("SGVsbG8=\n") === "Hello", "trailing newline ignored");
+
+    // btoa round-trip across the full byte range
+    let all = "";
+    for (let i = 0; i < 256; i++) all += String.fromCharCode(i);
+    check(atob(btoa(all)) === all, "btoa→atob round-trip over 0x00–0xFF");
+    expectThrow(() => btoa("\u0100"), "InvalidCharacterError", "btoa rejects code points > 0xFF");
+
+    // Large-input sanity: decode ~1 MiB and check length
+    const big = "QUJD".repeat(1 << 18);           // 4 * 262144 chars = 1 MiB input
+    const t0 = performance.now();
+    const decoded = atob(big);
+    const ms = (performance.now() - t0).toFixed(1);
+    check(decoded.length === (1 << 18) * 3,
+          `1 MiB-class base64 decodes to ${fmtBytes((1 << 18) * 3)}`, `took ${ms}ms`);
+
+    // Data-URI / URL-safe variants are NOT accepted by atob
+    expectThrow(() => atob("_-7u"), "InvalidCharacterError", "URL-safe alphabet (\"-_\" ) rejected by atob");
+  },
+});
+
+/* ---------------------------------------------------------------------------
+ * Suite 5 — String length & allocation
+ * JSC: wtf/text/StringImpl.h MaxLength = INT32_MAX; repeat()/concat validate
+ * length BEFORE allocation (fast-fail), so huge requests throw RangeError
+ * without OOMing the process.
+ * ------------------------------------------------------------------------ */
+SUITES.push({
+  id: "strings",
+  sigil: "\"\"",
+  title: "String length & allocation check",
+  desc: "Probes repeat() overflow rejection, quick-fail at StringImpl::MaxLength, and safe large-string growth (capped to protect mobile tabs from memory pressure).",
+  probes: [
+    "repeat() overflow: 2^32, negative, fractional",
+    "quick-fail at INT32_MAX boundary (no allocation)",
+    "growth doubling up to safety cap (64 Mi chars)",
+    "concat/replace at scale",
+  ],
+  async run() {
+    // Overflow rejections — must be instant RangeErrors, no allocation
+    const cases = [
+      ["repeat(2^32)",        () => "a".repeat(2 ** 32)],
+      ["repeat(2^31)",        () => "a".repeat(2 ** 31)],
+      ["repeat(-1)",          () => "a".repeat(-1)],
+      ["repeat(1.5)",         () => "a".repeat(1.5)],
+      ["repeat(2^53-1)",      () => "a".repeat(2 ** 53 - 1)],
+    ];
+    for (const [label, fn] of cases) {
+      const t0 = performance.now();
+      const e = expectThrow(fn, "RangeError", `${label} throws RangeError`);
+      if (e) {
+        const ms = performance.now() - t0;
+        if (ms > 250) warn_(`${label} took ${ms.toFixed(0)}ms — engine may be attempting allocation before validation`);
+        else muted(`  ↳ rejected in ${ms.toFixed(2)}ms — validated before allocation`);
+      }
+    }
+
+    // INT32_MAX itself (JSC's StringImpl::MaxLength) — expect RangeError
+    expectThrow(() => "a".repeat(0x7fffffff), "RangeError",
+                "repeat(0x7FFFFFFF) — at StringImpl::MaxLength — rejected");
+
+    // Capped growth probe: double until failure or 64 Mi chars (~64 MiB Latin-1).
+    // Kept conservative so iOS Safari tabs aren't killed by the OS.
+    const CEILING = 1 << 26;
+    let s = "abcdefgh", largest = 8, err = null;
+    const t0 = performance.now();
+    while (s.length < CEILING) {
+      try {
+        s = s + s;                     // doubling via concat
+        largest = s.length;
+      } catch (e) { err = e; break; }
+    }
+    const ms = (performance.now() - t0).toFixed(0);
+    if (err) {
+      pass_(`doubling stopped at ${fmtBytes(largest)} with ${err.constructor.name}: ${truncate(String(err.message), 50)}`);
+    } else {
+      info(`doubling reached safety cap ${fmtNum(largest)} chars (${fmtBytes(largest)}) in ${ms}ms — no limit encountered`);
+      muted(`  ↳ raise CEILING in source to probe further on desktop engines`);
+    }
+    // sanity: grown string still intact
+    check(s.length === largest && s[0] === "a" && s[s.length - 1] === "h",
+          "grown string content intact (no corruption)");
+    // replace at scale
+    const t1 = performance.now();
+    try {
+      const replaced = s.replace(/abcdefgh/g, "12345678");
+      check(replaced.length === s.length, "global replace over large string preserves length",
+            `took ${(performance.now() - t1).toFixed(0)}ms`);
+    } catch (e) { fail_(`global replace over large string threw ${e.constructor.name}`); }
+    s = null; // release before next suite
+  },
+});
+
+/* ============================================================================
+ * Engine / environment panel
+ * ==========================================================================*/
+function renderEnv() {
+  $("#engineBadge").textContent = ENGINE.label;
+  $("#engineBadge").classList.add("ok");
+  const rows = [
+    ["engine",    ENGINE.label],
+    ["platform",  navigator.platform || "n/a"],
+    ["language",  navigator.language],
+    ["cores",     navigator.hardwareConcurrency ?? "n/a"],
+    ["memory",    navigator.deviceMemory ? navigator.deviceMemory + " GiB (approx)" : "n/a (non-Chromium)"],
+    ["touch",     String(navigator.maxTouchPoints || 0) + " touch points"],
+    ["features",  Object.entries(FEATURES).filter(([, v]) => v).map(([k]) => k).join(", ") || "none detected"],
+    ["viewport",  `${innerWidth}×${innerHeight} @${devicePixelRatio}x, ${screen.orientation?.type ?? "n/a"}`],
+    ["userAgent", ENGINE.ua],
+  ];
+  $("#envInfo").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("");
+  head(`engine: ${ENGINE.label}`);
+  muted(`ua: ${ENGINE.ua}`);
+  muted(`features: ${Object.entries(FEATURES).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+}
+const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/* ============================================================================
+ * Card rendering & suite execution
+ * ==========================================================================*/
+function renderCards() {
+  const grid = $("#grid");
+  grid.innerHTML = SUITES.map((s) => `
+    <div class="card" id="card-${s.id}">
+      <div class="card-top">
+        <h2><span class="sigil">${s.sigil}</span>${s.title}</h2>
+        <span class="pill idle" id="pill-${s.id}">IDLE</span>
+      </div>
+      <p>${s.desc}</p>
+      <ul class="probe-list">${s.probes.map((p) => `<li>${p}</li>`).join("")}</ul>
+      <div class="card-foot">
+        <button class="small" data-run="${s.id}">▶ run</button>
+        <span class="time" id="time-${s.id}"></span>
+      </div>
+    </div>`).join("");
+  grid.addEventListener("click", (e) => {
+    const id = e.target?.dataset?.run;
+    if (id) runSuite(SUITES.find((s) => s.id === id));
+  });
+}
+
+let running = false;
+async function runSuite(suite) {
+  if (!suite || suite._busy) return;
+  suite._busy = true;
+  const pill = $(`#pill-${suite.id}`);
+  const card = $(`#card-${suite.id}`);
+  const timeEl = $(`#time-${suite.id}`);
+  const btn = card.querySelector("button");
+  pill.className = "pill running"; pill.textContent = "RUNNING";
+  card.className = "card running";
+  btn.disabled = true;
+  head(`── ${suite.title} ──`);
+  const failBefore = TALLY.fail;
+  const t0 = performance.now();
+  try {
+    await suite.run();
+  } catch (e) {
+    // A suite crashing must not take the page down — report and move on.
+    fail_(`suite aborted: ${e?.constructor?.name}: ${e}`);
+    muted(String(e?.stack || "").split("\n").slice(0, 3).join("\n"));
+  }
+  const ms = performance.now() - t0;
+  timeEl.textContent = `${ms.toFixed(0)} ms`;
+  const hadFail = TALLY.fail > failBefore;
+  pill.className = "pill " + (hadFail ? "fail" : "pass");
+  pill.textContent = hadFail ? "ISSUES" : "PASS";
+  card.className = "card " + (hadFail ? "fail" : "pass");
+  btn.disabled = false;
+  suite._busy = false;
+  muted(`── ${suite.title} finished in ${ms.toFixed(0)}ms ──`);
+}
+
+/* ============================================================================
+ * Wiring
+ * ==========================================================================*/
+$("#runAll").addEventListener("click", async () => {
+  if (running) return;
+  running = true;
+  const btn = $("#runAll");
+  btn.disabled = true; btn.textContent = "▶ RUNNING…";
+  head("═══ full diagnostic run started ═══");
+  const t0 = performance.now();
+  for (const s of SUITES) { await runSuite(s); }
+  const ms = performance.now() - t0;
+  head(`═══ full run finished in ${(ms / 1000).toFixed(2)}s — ` +
+       `pass=${TALLY.pass} fail=${TALLY.fail} warn=${TALLY.warn} skip=${TALLY.skip} ═══`);
+  btn.disabled = false; btn.textContent = "▶ RUN ALL";
+  running = false;
+});
+
+$("#clearConsole").addEventListener("click", () => { consoleEl.innerHTML = ""; });
+
+$("#copyResults").addEventListener("click", async () => {
+  const text = [...consoleEl.querySelectorAll(".line")]
+    .map((l) => l.textContent).join("\n");
+  const report = `# jsc-diagnostics report\nengine: ${ENGINE.label}\nua: ${ENGINE.ua}\n` +
+                 `tally: pass=${TALLY.pass} fail=${TALLY.fail} warn=${TALLY.warn} skip=${TALLY.skip}\n\n${text}\n`;
+  try {
+    await navigator.clipboard.writeText(report);
+    info("report copied to clipboard");
+  } catch {
+    warn_("clipboard unavailable (needs secure context) — select console text manually");
+  }
+});
+
+/* boot */
+renderEnv();
+renderCards();
+head("jsc-diagnostics ready — tap ▶ RUN ALL, or run individual probes");
+muted("note: on non-WebKit engines (V8/Gecko) boundary values will differ from JSC reference numbers; that delta is the diagnostic signal.");
+</script>
+</body>
+</html>
